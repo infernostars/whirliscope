@@ -1,0 +1,9 @@
+cross/*
+build/*
+bin/*
+obj/*
+limine-binary/*
+image.iso
+src/generated/*
+temp/*
+__pycache__

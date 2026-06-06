@@ -1,0 +1,16 @@
+#ifndef WHIRLISCOPE_USERSPACE_ADDRESS_SPACE_H
+#define WHIRLISCOPE_USERSPACE_ADDRESS_SPACE_H
+#pragma once
+
+#include <stdbool.h>
+#include <stdint.h>
+
+#define USERSPACE_MIN_VADDR 0x0000000000001000ull
+#define USERSPACE_MAX_VADDR 0x00007fffffffffffull
+#define USERSPACE_IMAGE_BASE 0x0000000000400000ull
+#define USERSPACE_STACK_TOP 0x00007ffffff00000ull
+#define KERNELSPACE_BASE_VADDR 0xffff800000000000ull
+
+bool userspace_range_is_valid(uint64_t vaddr, uint64_t size);
+
+#endif // WHIRLISCOPE_USERSPACE_ADDRESS_SPACE_H

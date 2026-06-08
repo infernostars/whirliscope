@@ -1,8 +1,8 @@
 #include "elf.h"
 
 #include "userspace/address_space.h"
-#include "libc/mem.h"
 #include "memory/vmm.h"
+#include <libc/mem.h>
 
 #define EI_NIDENT 16
 #define ELFMAG0 0x7f
@@ -93,8 +93,11 @@ bool elf64_validate_user_image(const void *image, size_t image_size,
             continue;
         }
 
+        if (phdr->p_memsz == 0) {
+            continue;
+        }
+
         if (phdr->p_memsz < phdr->p_filesz
-         || phdr->p_memsz == 0
          || (phdr->p_align != 0 && phdr->p_align < VMM_PAGE_SIZE)
          || !range_within_image(phdr->p_offset, phdr->p_filesz, image_size)
          || !userspace_range_is_valid(phdr->p_vaddr, phdr->p_memsz)) {

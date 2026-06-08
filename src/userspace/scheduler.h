@@ -8,6 +8,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+struct syscall_frame;
+
 struct scheduler_status {
     bool initialized;
     bool preemptive_enabled;
@@ -26,10 +28,16 @@ void scheduler_init(void);
 bool scheduler_prepare_launch(struct process *process,
                               struct arch_context *return_context);
 __attribute__((noreturn))
+void scheduler_run_process_blocking(struct process *process,
+                                    const struct syscall_frame *parent_frame);
+bool scheduler_finish_blocking_exit(long long status,
+                                    struct syscall_frame *return_frame);
+__attribute__((noreturn))
 void scheduler_enter_current(void);
 __attribute__((noreturn))
 void scheduler_exit_current(long long status);
 void scheduler_tick(struct interrupt_frame *frame);
 struct scheduler_status scheduler_get_status(void);
+struct process *scheduler_current_process(void);
 
 #endif // WHIRLISCOPE_USERSPACE_SCHEDULER_H

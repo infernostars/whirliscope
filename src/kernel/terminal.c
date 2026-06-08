@@ -59,20 +59,29 @@ void terminal_clear(void) {
 }
 
 void terminal_putchar(char ch) {
+    if (framebuffer_ready && framebuffer_enabled) {
+        framebuffer_console_putchar(ch);
+    }
+
     if (serial_enabled) {
         if (ch == '\n') {
             write_serial('\r');
         }
         write_serial(ch);
     }
-
-    if (framebuffer_ready && framebuffer_enabled) {
-        framebuffer_console_putchar(ch);
-    }
 }
 
 void terminal_write(const char *s, size_t n) {
-    for (size_t i = 0; i < n; i++) {
-        terminal_putchar(s[i]);
+    if (framebuffer_ready && framebuffer_enabled) {
+        framebuffer_console_write(s, n);
+    }
+
+    if (serial_enabled) {
+        for (size_t i = 0; i < n; i++) {
+            if (s[i] == '\n') {
+                write_serial('\r');
+            }
+            write_serial(s[i]);
+        }
     }
 }

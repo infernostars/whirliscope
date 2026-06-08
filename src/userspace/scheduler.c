@@ -2,6 +2,7 @@
 
 #include "kernel/panic.h"
 #include "memory/vmm.h"
+#include "userspace/syscall.h"
 
 static struct process *current;
 static struct arch_context *kernel_return_context;
@@ -12,6 +13,9 @@ static uint64_t user_preemptions;
 static uint64_t launches;
 static uint64_t exits;
 static long long last_exit_status;
+static bool blocking_run_active;
+static struct process *blocked_parent;
+static struct user_registers blocked_parent_regs;
 
 static bool frame_is_from_user(const struct interrupt_frame *frame) {
     return frame != NULL && (frame->cs & 3u) == 3u;
@@ -49,6 +53,9 @@ void scheduler_init(void) {
     launches = 0;
     exits = 0;
     last_exit_status = 0;
+    blocking_run_active = false;
+    blocked_parent = NULL;
+    blocked_parent_regs = (struct user_registers) {0};
 }
 
 bool scheduler_prepare_launch(struct process *process,
@@ -76,6 +83,99 @@ void scheduler_enter_current(void) {
     vmm_activate_address_space(current->pml4_phys);
     arch_enter_user(current->main_thread.regs.rip,
                     current->main_thread.regs.rsp);
+}
+
+static struct user_registers registers_from_syscall_frame(
+    const struct syscall_frame *frame
+) {
+    return (struct user_registers) {
+        .rip = frame->user_rip,
+        .rsp = frame->user_rsp,
+        .rflags = frame->rflags,
+        .rax = 0,
+        .rbx = frame->rbx,
+        .rcx = frame->rcx,
+        .rdx = frame->arg2,
+        .rsi = frame->arg1,
+        .rdi = frame->arg0,
+        .rbp = frame->rbp,
+        .r8 = frame->arg4,
+        .r9 = frame->arg5,
+        .r10 = frame->arg3,
+        .r11 = frame->r11,
+        .r12 = frame->r12,
+        .r13 = frame->r13,
+        .r14 = frame->r14,
+        .r15 = frame->r15,
+    };
+}
+
+static void syscall_frame_from_registers(struct syscall_frame *frame,
+                                         const struct user_registers *regs) {
+    frame->arg0 = regs->rdi;
+    frame->arg1 = regs->rsi;
+    frame->arg2 = regs->rdx;
+    frame->arg3 = regs->r10;
+    frame->arg4 = regs->r8;
+    frame->arg5 = regs->r9;
+    frame->rbx = regs->rbx;
+    frame->rcx = regs->rcx;
+    frame->rbp = regs->rbp;
+    frame->r11 = regs->r11;
+    frame->r12 = regs->r12;
+    frame->r13 = regs->r13;
+    frame->r14 = regs->r14;
+    frame->r15 = regs->r15;
+    frame->user_rip = regs->rip;
+    frame->user_rsp = regs->rsp;
+    frame->rflags = regs->rflags;
+}
+
+__attribute__((noreturn))
+void scheduler_run_process_blocking(struct process *process,
+                                    const struct syscall_frame *parent_frame) {
+    if (!initialized || current == NULL || process == NULL
+     || process->state != PROCESS_READY || process->main_thread.state != THREAD_READY
+     || parent_frame == NULL || blocking_run_active) {
+        panic("invalid blocking userspace launch");
+    }
+
+    struct process *parent = current;
+    parent->state = PROCESS_READY;
+    parent->main_thread.state = THREAD_BLOCKED;
+
+    blocked_parent = parent;
+    blocked_parent_regs = registers_from_syscall_frame(parent_frame);
+    blocking_run_active = true;
+
+    current = process;
+    scheduler_enter_current();
+}
+
+bool scheduler_finish_blocking_exit(long long status,
+                                    struct syscall_frame *return_frame) {
+    if (!blocking_run_active || blocked_parent == NULL || return_frame == NULL) {
+        return false;
+    }
+
+    if (current != NULL) {
+        current->state = PROCESS_EXITED;
+        current->main_thread.state = THREAD_EXITED;
+    }
+
+    exits++;
+    last_exit_status = status;
+
+    current = blocked_parent;
+    current->state = PROCESS_RUNNING;
+    current->main_thread.state = THREAD_RUNNING;
+    vmm_activate_address_space(current->pml4_phys);
+    syscall_frame_from_registers(return_frame, &blocked_parent_regs);
+
+    blocked_parent = NULL;
+    blocked_parent_regs = (struct user_registers) {0};
+    blocking_run_active = false;
+    return true;
 }
 
 __attribute__((noreturn))
@@ -126,4 +226,8 @@ struct scheduler_status scheduler_get_status(void) {
             ? current->main_thread.state
             : THREAD_EMPTY,
     };
+}
+
+struct process *scheduler_current_process(void) {
+    return current;
 }

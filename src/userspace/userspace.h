@@ -24,6 +24,7 @@ struct userspace_status {
     uint64_t launches;
     uint64_t exits;
     long long last_exit_status;
+    uint64_t app_count;
 };
 
 void userspace_init(void);

@@ -53,9 +53,16 @@ QEMUDEBUGFLAGS := -s -S
 
 USER_APP_NAME := init
 USER_APP_DIR := src/userspace/app
+USER_PROGRAMS_DIR := src/userspace/programs
+USER_HELLO_NAME := hello
+USER_HELLO_DIR := $(USER_PROGRAMS_DIR)/$(USER_HELLO_NAME)
+LIBC_DIR := src/libc
+USER_LIBC_USER_DIR := $(LIBC_DIR)/user
 USER_APP_BUILD_DIR := $(BUILD_DIR)/userspace
 USER_APP_ELF := $(USER_APP_BUILD_DIR)/$(USER_APP_NAME).elf
 USER_APP_OBJ := $(OBJ_DIR)/userspace/$(USER_APP_NAME).elf.o
+USER_HELLO_ELF := $(USER_APP_BUILD_DIR)/$(USER_HELLO_NAME).elf
+USER_HELLO_OBJ := $(OBJ_DIR)/userspace/$(USER_HELLO_NAME).elf.o
 USER_APP_LINKER := $(USER_APP_DIR)/linker.lds
 
 # Defaults overrides for variables if using "llvm" as toolchain.
@@ -141,6 +148,10 @@ override CPPFLAGS := \
 
 USER_CPPFLAGS := \
     -I $(USER_APP_DIR) \
+    -I $(USER_LIBC_USER_DIR) \
+    -I $(LIBC_DIR) \
+    -I src \
+    -DWHIRLISCOPE_USERSPACE=1 \
     -MMD \
     -MP
 
@@ -162,15 +173,24 @@ override LDFLAGS += \
 # Use "find" to glob all *.c, *.S, and *.asm files in the tree and obtain the
 # object and header dependency file names.
 override SRCFILES := $(shell find -L src -type f 2>/dev/null | LC_ALL=C sort)
-override KERNEL_SRCFILES := $(filter-out $(USER_APP_DIR)/%,$(SRCFILES))
+override LIBC_SRCFILES := $(filter $(LIBC_DIR)/%,$(SRCFILES))
+override LIBC_COMMON_SRCFILES := $(filter-out $(USER_LIBC_USER_DIR)/%,$(LIBC_SRCFILES))
+override USER_LIBC_SRCFILES := $(filter $(USER_LIBC_USER_DIR)/%,$(SRCFILES))
+override KERNEL_SRCFILES := $(filter-out $(USER_APP_DIR)/% $(USER_PROGRAMS_DIR)/% $(USER_LIBC_USER_DIR)/%,$(SRCFILES))
 override CFILES := $(filter %.c,$(KERNEL_SRCFILES))
 override ASFILES := $(filter %.S,$(KERNEL_SRCFILES))
 override NASMFILES := $(filter %.asm,$(KERNEL_SRCFILES))
-override USER_APP_SRCFILES := $(filter $(USER_APP_DIR)/%,$(SRCFILES))
-override USER_APP_CFILES := $(filter %.c,$(USER_APP_SRCFILES))
-override USER_APP_ASFILES := $(filter %.S,$(USER_APP_SRCFILES))
+override USER_COMMON_CFILES := $(filter %.c,$(LIBC_COMMON_SRCFILES) $(USER_LIBC_SRCFILES))
+override USER_INIT_CFILES := $(USER_APP_DIR)/app.c $(USER_COMMON_CFILES)
+override USER_INIT_ASFILES := $(USER_APP_DIR)/start.S
+override USER_HELLO_CFILES := $(USER_HELLO_DIR)/main.c $(USER_COMMON_CFILES)
+override USER_HELLO_ASFILES := $(USER_APP_DIR)/start.S
+override USER_APP_CFILES := $(USER_INIT_CFILES) $(USER_HELLO_CFILES)
+override USER_APP_ASFILES := $(USER_INIT_ASFILES) $(USER_HELLO_ASFILES)
 override USER_APP_OBJECTS := $(addprefix $(OBJ_DIR)/,$(USER_APP_CFILES:.c=.user.c.o) $(USER_APP_ASFILES:.S=.user.S.o))
-override OBJ := $(addprefix $(OBJ_DIR)/,$(CFILES:.c=.c.o) $(ASFILES:.S=.S.o) $(NASMFILES:.asm=.asm.o)) $(USER_APP_OBJ)
+override USER_INIT_OBJECTS := $(addprefix $(OBJ_DIR)/,$(USER_INIT_CFILES:.c=.user.c.o) $(USER_INIT_ASFILES:.S=.user.S.o))
+override USER_HELLO_OBJECTS := $(addprefix $(OBJ_DIR)/,$(USER_HELLO_CFILES:.c=.user.c.o) $(USER_HELLO_ASFILES:.S=.user.S.o))
+override OBJ := $(addprefix $(OBJ_DIR)/,$(CFILES:.c=.c.o) $(ASFILES:.S=.S.o) $(NASMFILES:.asm=.asm.o)) $(USER_APP_OBJ) $(USER_HELLO_OBJ)
 override HEADER_DEPS := $(addprefix $(OBJ_DIR)/,$(CFILES:.c=.c.d) $(ASFILES:.S=.S.d))
 override USER_APP_HEADER_DEPS := $(USER_APP_OBJECTS:.o=.d)
 override KERNEL := $(BIN_DIR)/$(OUTPUT)
@@ -234,9 +254,9 @@ $(OBJ_DIR)/%.user.S.o: %.S GNUmakefile
 	mkdir -p "$(dir $@)"
 	$(CC) $(USER_CFLAGS) $(USER_CPPFLAGS) -c $< -o $@
 
-$(USER_APP_ELF): $(USER_APP_LINKER) $(USER_APP_OBJECTS) GNUmakefile
+$(USER_APP_ELF): $(USER_APP_LINKER) $(USER_INIT_OBJECTS) GNUmakefile
 	mkdir -p "$(dir $@)"
-	$(LD) -m elf_x86_64 -nostdlib -static -T "$(USER_APP_LINKER)" $(USER_APP_OBJECTS) -o "$@"
+	$(LD) -m elf_x86_64 -nostdlib -static -T "$(USER_APP_LINKER)" $(USER_INIT_OBJECTS) -o "$@"
 
 $(USER_APP_OBJ): $(USER_APP_ELF)
 	mkdir -p "$(dir $@)"
@@ -244,6 +264,18 @@ $(USER_APP_OBJ): $(USER_APP_ELF)
 	    --rename-section .data=.rodata.user.init,alloc,load,readonly,data,contents \
 	    --redefine-sym _binary_build_userspace_init_elf_start=user_init_start \
 	    --redefine-sym _binary_build_userspace_init_elf_end=user_init_end \
+	    "$<" "$@"
+
+$(USER_HELLO_ELF): $(USER_APP_LINKER) $(USER_HELLO_OBJECTS) GNUmakefile
+	mkdir -p "$(dir $@)"
+	$(LD) -m elf_x86_64 -nostdlib -static -T "$(USER_APP_LINKER)" $(USER_HELLO_OBJECTS) -o "$@"
+
+$(USER_HELLO_OBJ): $(USER_HELLO_ELF)
+	mkdir -p "$(dir $@)"
+	$(OBJCOPY) -I binary -O elf64-x86-64 -B i386:x86-64 \
+	    --rename-section .data=.rodata.user.hello,alloc,load,readonly,data,contents \
+	    --redefine-sym _binary_build_userspace_hello_elf_start=user_hello_start \
+	    --redefine-sym _binary_build_userspace_hello_elf_end=user_hello_end \
 	    "$<" "$@"
 
 # Compilation rules for *.S files.

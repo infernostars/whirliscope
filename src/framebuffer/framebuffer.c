@@ -10,6 +10,14 @@
 #define CELL_WIDTH ((FONT_WIDTH + 1) * FONT_SCALE)
 #define CELL_HEIGHT ((FONT_HEIGHT + 1) * FONT_SCALE)
 #define TAB_WIDTH 4
+#define MAX_CONSOLE_COLS 160
+#define MAX_CONSOLE_ROWS 100
+
+struct framebuffer_cell {
+    char ch;
+    uint32_t fg;
+    uint32_t bg;
+};
 
 struct framebuffer_console {
     uint8_t *base;
@@ -28,10 +36,14 @@ struct framebuffer_console {
     size_t rows;
     size_t cursor_col;
     size_t cursor_row;
+    bool backing_ready;
+    bool batch_active;
+    bool redraw_deferred;
     bool ready;
 };
 
 static struct framebuffer_console console;
+static struct framebuffer_cell cells[MAX_CONSOLE_ROWS][MAX_CONSOLE_COLS];
 
 static const uint8_t (*const font)[FONT_HEIGHT] = ws_font;
 
@@ -53,21 +65,48 @@ static uint32_t make_color(uint8_t red, uint8_t green, uint8_t blue) {
          | color_component(blue, console.blue_mask_size, console.blue_mask_shift);
 }
 
-static void clear_rect(size_t x, size_t y, size_t width, size_t height) {
+static void clear_rect_color(size_t x, size_t y, size_t width, size_t height,
+                             uint32_t color) {
+    uint64_t wide_color = (uint64_t)color | ((uint64_t)color << 32);
+
     for (size_t row = 0; row < height; row++) {
         uint32_t *pixel = (uint32_t *)(console.base
             + (y + row) * console.pitch + x * 4);
-        for (size_t col = 0; col < width; col++) {
-            pixel[col] = console.bg;
+        size_t col = 0;
+
+        if (((uintptr_t)pixel & (sizeof(uint64_t) - 1)) == 0) {
+            uint64_t *wide = (uint64_t *)pixel;
+            for (; col + 1 < width; col += 2) {
+                *wide++ = wide_color;
+            }
+            pixel = (uint32_t *)wide;
+        }
+
+        for (; col < width; col++) {
+            *pixel++ = color;
         }
     }
 }
 
+static void clear_rect(size_t x, size_t y, size_t width, size_t height) {
+    clear_rect_color(x, y, width, height, console.bg);
+}
+
 static void fill_span(size_t x, size_t y, size_t width, uint32_t color) {
     uint32_t *pixel = (uint32_t *)(console.base + y * console.pitch + x * 4);
+    uint64_t wide_color = (uint64_t)color | ((uint64_t)color << 32);
+    size_t i = 0;
 
-    for (size_t i = 0; i < width; i++) {
-        pixel[i] = color;
+    if (((uintptr_t)pixel & (sizeof(uint64_t) - 1)) == 0) {
+        uint64_t *wide = (uint64_t *)pixel;
+        for (; i + 1 < width; i += 2) {
+            *wide++ = wide_color;
+        }
+        pixel = (uint32_t *)wide;
+    }
+
+    for (; i < width; i++) {
+        *pixel++ = color;
     }
 }
 
@@ -115,13 +154,13 @@ static void clear_cell_at(size_t col, size_t row) {
     clear_rect(col * CELL_WIDTH, row * CELL_HEIGHT, CELL_WIDTH, CELL_HEIGHT);
 }
 
-static void draw_char_at(size_t col, size_t row, char ch) {
+static void draw_cell_at(size_t col, size_t row, const struct framebuffer_cell *cell) {
     size_t x = col * CELL_WIDTH;
     size_t y = row * CELL_HEIGHT;
-    const uint8_t *glyph = glyph_for(ch);
+    const uint8_t *glyph = glyph_for(cell->ch);
 
-    if (ch == ' ') {
-        clear_cell_at(col, row);
+    clear_rect_color(x, y, CELL_WIDTH, CELL_HEIGHT, cell->bg);
+    if (cell->ch == ' ') {
         return;
     }
 
@@ -148,14 +187,97 @@ static void draw_char_at(size_t col, size_t row, char ch) {
             size_t pixel_x = x + 1 + run_start * FONT_SCALE;
             size_t run_width = (glyph_x - run_start) * FONT_SCALE;
             for (size_t dy = 0; dy < FONT_SCALE; dy++) {
-                fill_span(pixel_x, pixel_y + dy, run_width, console.fg);
+                fill_span(pixel_x, pixel_y + dy, run_width, cell->fg);
             }
         }
     }
 }
 
+static void set_cell(size_t col, size_t row, char ch) {
+    if (!console.backing_ready) {
+        return;
+    }
+
+    cells[row][col] = (struct framebuffer_cell) {
+        .ch = ch,
+        .fg = console.fg,
+        .bg = console.bg,
+    };
+}
+
+static void clear_backing_row(size_t row) {
+    if (!console.backing_ready) {
+        return;
+    }
+
+    for (size_t col = 0; col < console.cols; col++) {
+        cells[row][col] = (struct framebuffer_cell) {
+            .ch = ' ',
+            .fg = console.fg,
+            .bg = console.bg,
+        };
+    }
+}
+
+static void clear_backing(void) {
+    if (!console.backing_ready) {
+        return;
+    }
+
+    for (size_t row = 0; row < console.rows; row++) {
+        clear_backing_row(row);
+    }
+}
+
+static void redraw_from_backing(void) {
+    if (!console.backing_ready) {
+        return;
+    }
+
+    for (size_t row = 0; row < console.rows; row++) {
+        for (size_t col = 0; col < console.cols; col++) {
+            draw_cell_at(col, row, &cells[row][col]);
+        }
+    }
+}
+
+static void draw_char_at(size_t col, size_t row, char ch) {
+    struct framebuffer_cell cell = {
+        .ch = ch,
+        .fg = console.fg,
+        .bg = console.bg,
+    };
+
+    if (console.backing_ready) {
+        cells[row][col] = cell;
+    }
+
+    if (console.redraw_deferred) {
+        return;
+    }
+
+    draw_cell_at(col, row, &cell);
+}
+
 static void scroll(void) {
-    size_t copy_width = console.width * 4;
+    if (console.backing_ready) {
+        for (size_t row = 1; row < console.rows; row++) {
+            for (size_t col = 0; col < console.cols; col++) {
+                cells[row - 1][col] = cells[row][col];
+            }
+        }
+
+        clear_backing_row(console.rows - 1);
+        if (console.batch_active) {
+            console.redraw_deferred = true;
+            return;
+        }
+
+        redraw_from_backing();
+        return;
+    }
+
+    size_t copy_width = console.cols * CELL_WIDTH * 4;
     size_t copy_height = (console.rows - 1) * CELL_HEIGHT;
 
     for (size_t y = 0; y < copy_height; y++) {
@@ -164,7 +286,17 @@ static void scroll(void) {
         copy_row_forward(dest, src, copy_width);
     }
 
-    clear_rect(0, (console.rows - 1) * CELL_HEIGHT, console.width, CELL_HEIGHT);
+    clear_rect(0, (console.rows - 1) * CELL_HEIGHT,
+               console.cols * CELL_WIDTH, CELL_HEIGHT);
+}
+
+static void flush_deferred_redraw(void) {
+    if (!console.redraw_deferred) {
+        return;
+    }
+
+    redraw_from_backing();
+    console.redraw_deferred = false;
 }
 
 static void newline(void) {
@@ -198,6 +330,8 @@ bool framebuffer_console_init(struct limine_framebuffer *framebuffer) {
     console.rows = console.height / CELL_HEIGHT;
     console.cursor_col = 0;
     console.cursor_row = 0;
+    console.backing_ready = console.cols <= MAX_CONSOLE_COLS
+        && console.rows <= MAX_CONSOLE_ROWS;
 
     if (console.cols == 0 || console.rows == 0) {
         console.ready = false;
@@ -227,7 +361,7 @@ void framebuffer_console_set_background(uint8_t red, uint8_t green, uint8_t blue
     console.bg = make_color(red, green, blue);
 }
 
-void framebuffer_console_putchar(char ch) {
+static void putchar_inner(char ch) {
     if (!console.ready) {
         return;
     }
@@ -250,6 +384,7 @@ void framebuffer_console_putchar(char ch) {
         case '\b':
             if (console.cursor_col > 0) {
                 console.cursor_col--;
+                set_cell(console.cursor_col, console.cursor_row, ' ');
                 clear_cell_at(console.cursor_col, console.cursor_row);
             }
             return;
@@ -273,12 +408,37 @@ void framebuffer_console_putchar(char ch) {
     }
 }
 
+void framebuffer_console_putchar(char ch) {
+    putchar_inner(ch);
+    flush_deferred_redraw();
+}
+
+void framebuffer_console_write(const char *s, size_t n) {
+    if (!console.ready) {
+        return;
+    }
+
+    bool was_batching = console.batch_active;
+    console.batch_active = true;
+
+    for (size_t i = 0; i < n; i++) {
+        putchar_inner(s[i]);
+    }
+
+    console.batch_active = was_batching;
+    if (!console.batch_active) {
+        flush_deferred_redraw();
+    }
+}
+
 void framebuffer_console_clear(void) {
     if (!console.ready) {
         return;
     }
 
     clear_rect(0, 0, console.width, console.height);
+    clear_backing();
+    console.redraw_deferred = false;
     console.cursor_col = 0;
     console.cursor_row = 0;
 }

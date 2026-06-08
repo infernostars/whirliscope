@@ -2,6 +2,7 @@
 
 #include "kernel/klog.h"
 #include "kernel/terminal.h"
+#include "libc/string.h"
 
 void console_init(void) {
     terminal_init();
@@ -46,7 +47,5 @@ void console_write(const char *s, size_t n) {
 }
 
 void console_write_string(const char *s) {
-    while (*s != '\0') {
-        console_putchar(*s++);
-    }
+    console_write(s, strlen(s));
 }

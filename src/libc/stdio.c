@@ -1,8 +1,10 @@
 #include "stdio.h"
 
-#include "kernel/console.h"
+#include "string.h"
 #include <stdbool.h>
 #include <stdint.h>
+
+#define PRINT_BUFFER_SIZE 512
 
 struct out {
     void (*put)(char ch, void *ctx);
@@ -14,6 +16,11 @@ struct buffer_out {
     char *buffer;
     size_t size;
     size_t *count;
+};
+
+struct stream_out {
+    char buffer[PRINT_BUFFER_SIZE];
+    size_t len;
 };
 
 enum int_len {
@@ -156,9 +163,21 @@ static void buffer_put(char ch, void *ctx) {
     }
 }
 
-static void putchar_put(char ch, void *ctx) {
-    (void)ctx;
-    putchar((unsigned char)ch);
+static void stream_flush(struct stream_out *stream) {
+    if (stream->len > 0) {
+        whrlibc_write(stream->buffer, stream->len);
+        stream->len = 0;
+    }
+}
+
+static void stream_put(char ch, void *ctx) {
+    struct stream_out *stream = ctx;
+
+    if (stream->len == sizeof(stream->buffer)) {
+        stream_flush(stream);
+    }
+
+    stream->buffer[stream->len++] = ch;
 }
 
 static int vformat(struct out *out, const char *fmt, va_list args) {
@@ -350,12 +369,20 @@ static int vformat(struct out *out, const char *fmt, va_list args) {
 }
 
 int putchar(int ch) {
-    console_putchar((char)ch);
-    return ch;
+    char out = (char)ch;
+    whrlibc_write(&out, 1);
+    return (unsigned char)ch;
+}
+
+int fputs(const char *s) {
+    whrlibc_write(s, strlen(s));
+    return 0;
 }
 
 int puts(const char *s) {
-    return printf("%s\n", s);
+    fputs(s);
+    whrlibc_write("\n", 1);
+    return 0;
 }
 
 int printf(const char *restrict fmt, ...) {
@@ -367,13 +394,18 @@ int printf(const char *restrict fmt, ...) {
 }
 
 int vprintf(const char *restrict fmt, va_list args) {
+    struct stream_out stream = {
+        .len = 0,
+    };
     struct out out = {
-        .put = putchar_put,
-        .ctx = NULL,
+        .put = stream_put,
+        .ctx = &stream,
         .count = 0,
     };
 
-    return vformat(&out, fmt, args);
+    int written = vformat(&out, fmt, args);
+    stream_flush(&stream);
+    return written;
 }
 
 int snprintf(char *restrict s, size_t n, const char *restrict fmt, ...) {

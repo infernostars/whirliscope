@@ -43,6 +43,7 @@ struct userspace_status userspace_get_status(void) {
         .launches = scheduler.launches,
         .exits = scheduler.exits,
         .last_exit_status = scheduler.last_exit_status,
+        .app_count = process_embedded_app_count(),
     };
 }
 

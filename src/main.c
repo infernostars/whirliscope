@@ -2,9 +2,10 @@
 #include "boot/limine_requests.h"
 #include "drivers/keyboard.h"
 #include "drivers/timer.h"
+#include "kernel/boot_info.h"
 #include "kernel/console.h"
 #include "kernel/panic.h"
-#include "kernel/shell.h"
+#include "libc/stdio.h"
 #include "memory/heap.h"
 #include "memory/pmm.h"
 #include "memory/vmm.h"
@@ -35,7 +36,7 @@ void kmain(void) {
     struct limine_framebuffer *framebuffer = framebuffer_request.response->framebuffers[0];
 
     console_attach_framebuffer(framebuffer);
-    shell_set_framebuffer(framebuffer);
+    boot_info_set_framebuffer(framebuffer);
     arch_init();
 
     if (memmap_request.response == NULL || hhdm_request.response == NULL) {
@@ -55,5 +56,5 @@ void kmain(void) {
 
     userspace_launch_init();
 
-    shell_run();
+    panic("userspace init exited");
 }

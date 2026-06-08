@@ -151,17 +151,36 @@ void exception_dispatch(struct interrupt_frame *frame) {
             .arg3 = frame->r10,
             .arg4 = frame->r8,
             .arg5 = frame->r9,
+            .rbx = frame->rbx,
+            .rcx = frame->rcx,
+            .rbp = frame->rbp,
+            .r11 = frame->r11,
+            .r12 = frame->r12,
+            .r13 = frame->r13,
+            .r14 = frame->r14,
+            .r15 = frame->r15,
             .user_rip = frame->rip,
             .user_rsp = frame->user_rsp,
             .rflags = frame->rflags,
         };
         frame->rax = (uint64_t)syscall_dispatch(&syscall);
+        frame->rbx = syscall.rbx;
+        frame->rcx = syscall.rcx;
         frame->rdi = syscall.arg0;
         frame->rsi = syscall.arg1;
         frame->rdx = syscall.arg2;
         frame->r10 = syscall.arg3;
         frame->r8 = syscall.arg4;
         frame->r9 = syscall.arg5;
+        frame->rbp = syscall.rbp;
+        frame->r11 = syscall.r11;
+        frame->r12 = syscall.r12;
+        frame->r13 = syscall.r13;
+        frame->r14 = syscall.r14;
+        frame->r15 = syscall.r15;
+        frame->rip = syscall.user_rip;
+        frame->user_rsp = syscall.user_rsp;
+        frame->rflags = syscall.rflags;
         return;
     }
 

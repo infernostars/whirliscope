@@ -159,17 +159,17 @@ static void history_next(void) {
 
 static void command_help(void) {
     printf("kernel commands:\n");
-    printf("  help     show this command list\n");
-    printf("  about    print kernel status summary\n");
-    printf("  fb       print framebuffer info\n");
-    printf("  heap     print heap stats and validation state\n");
-    printf("  log      print recent kernel log output\n");
-    printf("  pmmtest  allocate, translate, and free one physical page\n");
-    printf("  selftest run heap and translation self-tests\n");
-    printf("  ticks    print PIT tick counter\n");
+    printf("  help       show this command list\n");
+    printf("  about      print kernel status summary\n");
+    printf("  fb         print framebuffer info\n");
+    printf("  heap       print heap stats and validation state\n");
+    printf("  log        print recent kernel log output\n");
+    printf("  pmmtest    allocate, translate, and free one physical page\n");
+    printf("  selftest   run heap and translation self-tests\n");
+    printf("  ticks      print PIT tick counter\n");
     printf("  userspace  get details about userspace\n");
     printf("  userrun    enter the embedded user init task\n");
-    printf("  panic    intentionally trigger panic/assert path\n");
+    printf("  panic      intentionally trigger panic/assert path\n");
 }
 
 static void command_mem(void) {

@@ -2,10 +2,16 @@
 
 #include "drivers/keyboard.h"
 #include "kernel/console.h"
+#include "libc/mem.h"
+#include "userspace/address_space.h"
 #include "memory/pmm.h"
+#include "memory/vmm.h"
 #include "userspace/scheduler.h"
 
 static bool dispatch_ready;
+
+#define USER_WRITE_CHUNK 256u
+#define SYSCALL_ERR_FAULT (-14ll)
 
 void syscall_init(void) {
     dispatch_ready = true;
@@ -13,6 +19,55 @@ void syscall_init(void) {
 
 bool syscall_dispatch_ready(void) {
     return dispatch_ready;
+}
+
+static bool read_user_bytes(uint64_t user_address, void *dest, size_t len) {
+    uint8_t *out = dest;
+
+    for (size_t copied = 0; copied < len; ) {
+        uint64_t physical_address;
+        if (!vmm_virt_to_phys(user_address + copied, &physical_address)) {
+            return false;
+        }
+
+        size_t page_bytes = VMM_PAGE_SIZE
+            - (size_t)(physical_address & (VMM_PAGE_SIZE - 1));
+        size_t chunk = len - copied < page_bytes ? len - copied : page_bytes;
+
+        memcpy(out + copied, pmm_phys_to_virt(physical_address), chunk);
+        copied += chunk;
+    }
+
+    return true;
+}
+
+static long long write_user_string(uint64_t user_address, size_t len) {
+    if (len == 0) {
+        return 0;
+    }
+
+    if (!userspace_range_is_valid(user_address, len)) {
+        return SYSCALL_ERR_FAULT;
+    }
+
+    char buffer[USER_WRITE_CHUNK];
+    size_t written = 0;
+
+    while (written < len) {
+        size_t chunk = len - written;
+        if (chunk > sizeof(buffer)) {
+            chunk = sizeof(buffer);
+        }
+
+        if (!read_user_bytes(user_address + written, buffer, chunk)) {
+            return SYSCALL_ERR_FAULT;
+        }
+
+        console_write(buffer, chunk);
+        written += chunk;
+    }
+
+    return (long long)len;
 }
 
 long long syscall_dispatch(struct syscall_frame *frame) {
@@ -67,6 +122,8 @@ long long syscall_dispatch(struct syscall_frame *frame) {
             frame->arg3 = pmm_hhdm_offset();
             return 0;
         }
+        case SYSCALL_DEBUG_WRITE:
+            return write_user_string(frame->arg0, (size_t)frame->arg1);
         default:
             return SYSCALL_ERR_NOSYS;
     }

@@ -18,6 +18,7 @@ enum syscall_number {
     SYSCALL_SET_BACKGROUND = 7,
     SYSCALL_RESET_COLORS = 8,
     SYSCALL_MEMORY_STATUS = 9,
+    SYSCALL_DEBUG_WRITE = 10,
 };
 
 struct syscall_frame {

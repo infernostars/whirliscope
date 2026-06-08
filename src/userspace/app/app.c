@@ -9,6 +9,7 @@
 #define SYSCALL_SET_BACKGROUND 7
 #define SYSCALL_RESET_COLORS 8
 #define SYSCALL_MEMORY_STATUS 9
+#define SYSCALL_DEBUG_WRITE 10
 
 #define ERR_AGAIN (-11L)
 
@@ -82,6 +83,19 @@ static long syscall1(long number, long arg0) {
     return rax;
 }
 
+static long syscall2(long number, long arg0, long arg1) {
+    register long rax asm("rax") = number;
+    register long rdi asm("rdi") = arg0;
+    register long rsi asm("rsi") = arg1;
+
+    asm volatile ("int $0x80"
+                  : "+a"(rax)
+                  : "D"(rdi), "S"(rsi)
+                  : "rcx", "rdx", "r8", "r9", "r10", "r11",
+                    "memory");
+    return rax;
+}
+
 static long syscall3(long number, long arg0, long arg1, long arg2) {
     register long rax asm("rax") = number;
     register long rdi asm("rdi") = arg0;
@@ -129,23 +143,21 @@ static void putchar(char ch) {
     syscall1(SYSCALL_PUTCHAR, (unsigned char)ch);
 }
 
-static void puts(const char *s) {
-    while (*s != '\0') {
-        putchar(*s++);
-    }
-}
-
-static void println(const char *s) {
-    puts(s);
-    putchar('\n');
-}
-
-static size_t strlen(const char *s) {
+static size_t string_length(const char *s) {
     size_t len = 0;
     while (s[len] != '\0') {
         len++;
     }
     return len;
+}
+
+static void puts(const char *s) {
+    syscall2(SYSCALL_DEBUG_WRITE, (long)s, (long)string_length(s));
+}
+
+static void println(const char *s) {
+    puts(s);
+    putchar('\n');
 }
 
 static int strcmp(const char *a, const char *b) {
@@ -173,7 +185,7 @@ static char *skip_spaces(char *s) {
 }
 
 static void trim_right(char *s) {
-    size_t len = strlen(s);
+    size_t len = string_length(s);
     while (len > 0 && is_space(s[len - 1])) {
         s[--len] = '\0';
     }

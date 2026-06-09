@@ -3,6 +3,7 @@
 #include "kernel/panic.h"
 #include "memory/vmm.h"
 #include "userspace/syscall.h"
+#include <libc/mem.h>
 
 static struct process *current;
 static struct arch_context *kernel_return_context;
@@ -13,9 +14,14 @@ static uint64_t user_preemptions;
 static uint64_t launches;
 static uint64_t exits;
 static long long last_exit_status;
-static bool blocking_run_active;
-static struct process *blocked_parent;
-static struct user_registers blocked_parent_regs;
+
+struct blocking_run {
+    struct process *parent;
+    struct user_registers parent_regs;
+};
+
+static struct blocking_run blocking_runs[USERSPACE_MAX_PROCESSES];
+static size_t blocking_run_depth;
 
 static bool frame_is_from_user(const struct interrupt_frame *frame) {
     return frame != NULL && (frame->cs & 3u) == 3u;
@@ -53,9 +59,8 @@ void scheduler_init(void) {
     launches = 0;
     exits = 0;
     last_exit_status = 0;
-    blocking_run_active = false;
-    blocked_parent = NULL;
-    blocked_parent_regs = (struct user_registers) {0};
+    memset(blocking_runs, 0, sizeof(blocking_runs));
+    blocking_run_depth = 0;
 }
 
 bool scheduler_prepare_launch(struct process *process,
@@ -136,7 +141,7 @@ void scheduler_run_process_blocking(struct process *process,
                                     const struct syscall_frame *parent_frame) {
     if (!initialized || current == NULL || process == NULL
      || process->state != PROCESS_READY || process->main_thread.state != THREAD_READY
-     || parent_frame == NULL || blocking_run_active) {
+     || parent_frame == NULL || blocking_run_depth >= USERSPACE_MAX_PROCESSES) {
         panic("invalid blocking userspace launch");
     }
 
@@ -144,9 +149,10 @@ void scheduler_run_process_blocking(struct process *process,
     parent->state = PROCESS_READY;
     parent->main_thread.state = THREAD_BLOCKED;
 
-    blocked_parent = parent;
-    blocked_parent_regs = registers_from_syscall_frame(parent_frame);
-    blocking_run_active = true;
+    blocking_runs[blocking_run_depth++] = (struct blocking_run) {
+        .parent = parent,
+        .parent_regs = registers_from_syscall_frame(parent_frame),
+    };
 
     current = process;
     scheduler_enter_current();
@@ -154,7 +160,13 @@ void scheduler_run_process_blocking(struct process *process,
 
 bool scheduler_finish_blocking_exit(long long status,
                                     struct syscall_frame *return_frame) {
-    if (!blocking_run_active || blocked_parent == NULL || return_frame == NULL) {
+    if (blocking_run_depth == 0 || return_frame == NULL) {
+        return false;
+    }
+
+    struct blocking_run run = blocking_runs[--blocking_run_depth];
+    blocking_runs[blocking_run_depth] = (struct blocking_run) {0};
+    if (run.parent == NULL) {
         return false;
     }
 
@@ -166,15 +178,12 @@ bool scheduler_finish_blocking_exit(long long status,
     exits++;
     last_exit_status = status;
 
-    current = blocked_parent;
+    current = run.parent;
     current->state = PROCESS_RUNNING;
     current->main_thread.state = THREAD_RUNNING;
     vmm_activate_address_space(current->pml4_phys);
-    syscall_frame_from_registers(return_frame, &blocked_parent_regs);
+    syscall_frame_from_registers(return_frame, &run.parent_regs);
 
-    blocked_parent = NULL;
-    blocked_parent_regs = (struct user_registers) {0};
-    blocking_run_active = false;
     return true;
 }
 

@@ -4,11 +4,14 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdarg.h>
 
 #define KLOG_CAPACITY 8192u
 
 void klog_putchar(char ch);
 void klog_write(const char *s, size_t n);
+void klog_printf(const char *fmt, ...);
+void klog_vprintf(const char *fmt, va_list args);
 size_t klog_size(void);
 uint64_t klog_total_written(void);
 uint64_t klog_dropped(void);

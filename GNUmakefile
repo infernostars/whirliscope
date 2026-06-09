@@ -12,6 +12,9 @@ BIN_DIR := $(BUILD_DIR)/bin
 ISO_ROOT := $(BUILD_DIR)/iso_root
 ISO := $(BUILD_DIR)/image.iso
 ISO_ROOT_STAMP := $(ISO_ROOT)/.stamp
+ROOTFS_SRC := rootfs
+ROOTFS_STAGE := $(BUILD_DIR)/rootfs_stage
+ROOTFS_IMAGE := $(BUILD_DIR)/rootfs.ext2
 LIMINE_DIR := $(BUILD_DIR)/limine-binary
 LIMINE_TARBALL_URL := https://github.com/Limine-Bootloader/Limine/releases/latest/download/limine-binary.tar.gz
 GDB_SCRIPT := $(BUILD_DIR)/gdbinit
@@ -48,21 +51,16 @@ PYTHON := python3
 OBJCOPY := $(TOOLCHAIN_PREFIX)objcopy
 GDB_HOST := localhost
 GDB_PORT := 1234
-QEMUFLAGS := -m 64M -cdrom "$(ISO)" -boot d -serial mon:stdio
+QEMUFLAGS := -m 64M -cdrom "$(ISO)" -drive file="$(ROOTFS_IMAGE)",format=raw,if=ide,index=1,media=disk -boot d -serial mon:stdio
 QEMUDEBUGFLAGS := -s -S
 
 USER_APP_NAME := init
 USER_APP_DIR := src/userspace/app
 USER_PROGRAMS_DIR := src/userspace/programs
-USER_HELLO_NAME := hello
-USER_HELLO_DIR := $(USER_PROGRAMS_DIR)/$(USER_HELLO_NAME)
 LIBC_DIR := src/libc
 USER_LIBC_USER_DIR := $(LIBC_DIR)/user
 USER_APP_BUILD_DIR := $(BUILD_DIR)/userspace
 USER_APP_ELF := $(USER_APP_BUILD_DIR)/$(USER_APP_NAME).elf
-USER_APP_OBJ := $(OBJ_DIR)/userspace/$(USER_APP_NAME).elf.o
-USER_HELLO_ELF := $(USER_APP_BUILD_DIR)/$(USER_HELLO_NAME).elf
-USER_HELLO_OBJ := $(OBJ_DIR)/userspace/$(USER_HELLO_NAME).elf.o
 USER_APP_LINKER := $(USER_APP_DIR)/linker.lds
 
 # Defaults overrides for variables if using "llvm" as toolchain.
@@ -181,16 +179,19 @@ override CFILES := $(filter %.c,$(KERNEL_SRCFILES))
 override ASFILES := $(filter %.S,$(KERNEL_SRCFILES))
 override NASMFILES := $(filter %.asm,$(KERNEL_SRCFILES))
 override USER_COMMON_CFILES := $(filter %.c,$(LIBC_COMMON_SRCFILES) $(USER_LIBC_SRCFILES))
+override USER_PROGRAM_MAIN_CFILES := $(wildcard $(USER_PROGRAMS_DIR)/*/main.c)
+override USER_PROGRAM_NAMES := $(patsubst $(USER_PROGRAMS_DIR)/%/main.c,%,$(USER_PROGRAM_MAIN_CFILES))
+override USER_PROGRAM_ELFS := $(addprefix $(USER_APP_BUILD_DIR)/,$(addsuffix .elf,$(USER_PROGRAM_NAMES)))
 override USER_INIT_CFILES := $(USER_APP_DIR)/app.c $(USER_COMMON_CFILES)
 override USER_INIT_ASFILES := $(USER_APP_DIR)/start.S
-override USER_HELLO_CFILES := $(USER_HELLO_DIR)/main.c $(USER_COMMON_CFILES)
-override USER_HELLO_ASFILES := $(USER_APP_DIR)/start.S
-override USER_APP_CFILES := $(USER_INIT_CFILES) $(USER_HELLO_CFILES)
-override USER_APP_ASFILES := $(USER_INIT_ASFILES) $(USER_HELLO_ASFILES)
+override USER_APP_CFILES := $(USER_INIT_CFILES) $(USER_PROGRAM_MAIN_CFILES)
+override USER_APP_ASFILES := $(USER_INIT_ASFILES)
 override USER_APP_OBJECTS := $(addprefix $(OBJ_DIR)/,$(USER_APP_CFILES:.c=.user.c.o) $(USER_APP_ASFILES:.S=.user.S.o))
-override USER_INIT_OBJECTS := $(addprefix $(OBJ_DIR)/,$(USER_INIT_CFILES:.c=.user.c.o) $(USER_INIT_ASFILES:.S=.user.S.o))
-override USER_HELLO_OBJECTS := $(addprefix $(OBJ_DIR)/,$(USER_HELLO_CFILES:.c=.user.c.o) $(USER_HELLO_ASFILES:.S=.user.S.o))
-override OBJ := $(addprefix $(OBJ_DIR)/,$(CFILES:.c=.c.o) $(ASFILES:.S=.S.o) $(NASMFILES:.asm=.asm.o)) $(USER_APP_OBJ) $(USER_HELLO_OBJ)
+override USER_COMMON_OBJECTS := $(addprefix $(OBJ_DIR)/,$(USER_COMMON_CFILES:.c=.user.c.o))
+override USER_START_OBJECT := $(addprefix $(OBJ_DIR)/,$(USER_APP_DIR)/start.user.S.o)
+override USER_INIT_MAIN_OBJECT := $(addprefix $(OBJ_DIR)/,$(USER_APP_DIR)/app.user.c.o)
+override USER_INIT_OBJECTS := $(USER_INIT_MAIN_OBJECT) $(USER_COMMON_OBJECTS) $(USER_START_OBJECT)
+override OBJ := $(addprefix $(OBJ_DIR)/,$(CFILES:.c=.c.o) $(ASFILES:.S=.S.o) $(NASMFILES:.asm=.asm.o))
 override HEADER_DEPS := $(addprefix $(OBJ_DIR)/,$(CFILES:.c=.c.d) $(ASFILES:.S=.S.d))
 override USER_APP_HEADER_DEPS := $(USER_APP_OBJECTS:.o=.d)
 override KERNEL := $(BIN_DIR)/$(OUTPUT)
@@ -258,25 +259,9 @@ $(USER_APP_ELF): $(USER_APP_LINKER) $(USER_INIT_OBJECTS) GNUmakefile
 	mkdir -p "$(dir $@)"
 	$(LD) -m elf_x86_64 -nostdlib -static -T "$(USER_APP_LINKER)" $(USER_INIT_OBJECTS) -o "$@"
 
-$(USER_APP_OBJ): $(USER_APP_ELF)
+$(USER_APP_BUILD_DIR)/%.elf: $(USER_APP_LINKER) $(OBJ_DIR)/$(USER_PROGRAMS_DIR)/%/main.user.c.o $(USER_COMMON_OBJECTS) $(USER_START_OBJECT) GNUmakefile
 	mkdir -p "$(dir $@)"
-	$(OBJCOPY) -I binary -O elf64-x86-64 -B i386:x86-64 \
-	    --rename-section .data=.rodata.user.init,alloc,load,readonly,data,contents \
-	    --redefine-sym _binary_build_userspace_init_elf_start=user_init_start \
-	    --redefine-sym _binary_build_userspace_init_elf_end=user_init_end \
-	    "$<" "$@"
-
-$(USER_HELLO_ELF): $(USER_APP_LINKER) $(USER_HELLO_OBJECTS) GNUmakefile
-	mkdir -p "$(dir $@)"
-	$(LD) -m elf_x86_64 -nostdlib -static -T "$(USER_APP_LINKER)" $(USER_HELLO_OBJECTS) -o "$@"
-
-$(USER_HELLO_OBJ): $(USER_HELLO_ELF)
-	mkdir -p "$(dir $@)"
-	$(OBJCOPY) -I binary -O elf64-x86-64 -B i386:x86-64 \
-	    --rename-section .data=.rodata.user.hello,alloc,load,readonly,data,contents \
-	    --redefine-sym _binary_build_userspace_hello_elf_start=user_hello_start \
-	    --redefine-sym _binary_build_userspace_hello_elf_end=user_hello_end \
-	    "$<" "$@"
+	$(LD) -m elf_x86_64 -nostdlib -static -T "$(USER_APP_LINKER)" $(OBJ_DIR)/$(USER_PROGRAMS_DIR)/$*/main.user.c.o $(USER_COMMON_OBJECTS) $(USER_START_OBJECT) -o "$@"
 
 # Compilation rules for *.S files.
 $(OBJ_DIR)/%.S.o: %.S GNUmakefile
@@ -291,10 +276,21 @@ $(OBJ_DIR)/%.asm.o: %.asm GNUmakefile
 .PHONY: iso-root
 iso-root: $(ISO_ROOT_STAMP)
 
-$(ISO_ROOT_STAMP): $(KERNEL) $(LIMINE_CONFIG) $(LIMINE_FILES) GNUmakefile
+$(ROOTFS_IMAGE): GNUmakefile $(USER_APP_ELF) $(USER_PROGRAM_ELFS) $(shell find -L $(ROOTFS_SRC) -type f 2>/dev/null | LC_ALL=C sort)
+	mkdir -p "$(dir $@)"
+	rm -rf "$(ROOTFS_STAGE)"
+	mkdir -p "$(ROOTFS_STAGE)"
+	cp -a "$(ROOTFS_SRC)/." "$(ROOTFS_STAGE)/"
+	mkdir -p "$(ROOTFS_STAGE)/bin"
+	cp -v "$(USER_APP_ELF)" "$(ROOTFS_STAGE)/bin/init"
+	$(foreach program,$(USER_PROGRAM_NAMES),cp -v "$(USER_APP_BUILD_DIR)/$(program).elf" "$(ROOTFS_STAGE)/bin/$(program)";)
+	mke2fs -q -F -t ext2 -L WHIRLROOT -d "$(ROOTFS_STAGE)" "$@" 4096
+
+$(ISO_ROOT_STAMP): $(KERNEL) $(LIMINE_CONFIG) $(LIMINE_FILES) $(ROOTFS_IMAGE) GNUmakefile
 	rm -rf "$(ISO_ROOT)"
 	mkdir -p "$(ISO_ROOT)/boot/limine" "$(ISO_ROOT)/EFI/BOOT"
 	cp -v "$(KERNEL)" "$(ISO_ROOT)/boot/"
+	cp -v "$(ROOTFS_IMAGE)" "$(ISO_ROOT)/boot/rootfs.ext2"
 	cp -v "$(LIMINE_CONFIG)" "$(ISO_ROOT)/boot/limine/limine.conf"
 	cp -v "$(LIMINE_DIR)/limine-bios.sys" "$(ISO_ROOT)/boot/limine/"
 	cp -v "$(LIMINE_DIR)/limine-bios-cd.bin" "$(ISO_ROOT)/boot/limine/"
@@ -340,7 +336,7 @@ $(GDB_SCRIPT): GNUmakefile $(KERNEL)
 # Remove object files and the final executable.
 .PHONY: clean
 clean:
-	rm -rf "$(OBJ_DIR)" "$(BIN_DIR)" "$(USER_APP_BUILD_DIR)" "$(ISO_ROOT)" "$(ISO)" "$(ISO_INSTALLED_STAMP)" "$(GDB_SCRIPT)"
+	rm -rf "$(OBJ_DIR)" "$(BIN_DIR)" "$(USER_APP_BUILD_DIR)" "$(ISO_ROOT)" "$(ISO)" "$(ISO_INSTALLED_STAMP)" "$(GDB_SCRIPT)" "$(ROOTFS_IMAGE)" "$(ROOTFS_STAGE)"
 
 .PHONY: distclean
 distclean: clean

@@ -1,5 +1,28 @@
 #include "klog.h"
 
+#include "libc/stdio.h"
+
+void klog_vprintf(const char *fmt, va_list args) {
+    char buffer[256];
+    int len = vsnprintf(buffer, sizeof(buffer), fmt, args);
+    if (len < 0) {
+        return;
+    }
+
+    size_t written = (size_t)len;
+    if (written >= sizeof(buffer)) {
+        written = sizeof(buffer) - 1;
+    }
+    klog_write(buffer, written);
+}
+
+void klog_printf(const char *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    klog_vprintf(fmt, args);
+    va_end(args);
+}
+
 static char ring[KLOG_CAPACITY];
 static size_t head;
 static size_t used;

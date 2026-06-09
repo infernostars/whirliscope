@@ -2,6 +2,7 @@
 #define WHIRLISCOPE_USERSPACE_PROCESS_H
 #pragma once
 
+#include "userspace/abi.h"
 #include "userspace/elf.h"
 #include <stdbool.h>
 #include <stddef.h>
@@ -12,12 +13,6 @@
 
 typedef uint64_t process_id_t;
 typedef uint64_t thread_id_t;
-
-struct embedded_user_app {
-    const char *name;
-    const uint8_t *start;
-    const uint8_t *end;
-};
 
 enum process_state {
     PROCESS_EMPTY,
@@ -75,20 +70,20 @@ struct process {
     uint64_t heap_end;
     struct thread main_thread;
     char name[PROCESS_NAME_SIZE];
+    char cwd[USER_FS_PATH_SIZE];
 };
 
 void process_table_init(void);
 struct process *process_first(void);
-struct process *process_create_embedded_process(size_t app_index);
-size_t process_embedded_app_count(void);
-const struct embedded_user_app *process_embedded_app_at(size_t index);
+struct process *process_create_filesystem_process(const char *path,
+                                                  const char *cwd);
+bool process_create_filesystem_init(const char *path);
 bool process_prepare_user_image(struct process *process, process_id_t pid,
                                 const char *name, uint64_t pml4_phys,
                                 const struct elf64_image *image);
-bool process_create_embedded_app(size_t app_index);
-bool process_create_embedded_demo(void);
 bool process_sbrk(struct process *process, int64_t increment,
                   uint64_t *old_break);
+bool process_set_cwd(struct process *process, const char *path);
 const char *process_state_name(enum process_state state);
 const char *thread_state_name(enum thread_state state);
 

@@ -78,3 +78,17 @@ char *strchr(const char *s, int c) {
         }
     }
 }
+
+char *strrchr(const char *s, int c) {
+    char ch = (char)c;
+    const char *last = NULL;
+
+    for (;; s++) {
+        if (*s == ch) {
+            last = s;
+        }
+        if (*s == '\0') {
+            return (char *)last;
+        }
+    }
+}

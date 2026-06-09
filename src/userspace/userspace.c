@@ -16,7 +16,10 @@ void userspace_init(void) {
     process_table_init();
     scheduler_init();
     syscall_init();
-    init_process_ready = process_create_embedded_demo();
+    init_process_ready = process_create_filesystem_init("/bin/init");
+    if (!init_process_ready) {
+        panic("filesystem /bin/init could not be loaded");
+    }
     initialized = true;
 }
 
@@ -43,7 +46,7 @@ struct userspace_status userspace_get_status(void) {
         .launches = scheduler.launches,
         .exits = scheduler.exits,
         .last_exit_status = scheduler.last_exit_status,
-        .app_count = process_embedded_app_count(),
+        .app_count = 0,
     };
 }
 
@@ -58,7 +61,10 @@ void userspace_launch_init(void) {
     }
 
     if (init->state == PROCESS_EXITED) {
-        init_process_ready = process_create_embedded_demo();
+        init_process_ready = process_create_filesystem_init("/bin/init");
+        if (!init_process_ready) {
+            panic("filesystem /bin/init could not be reloaded");
+        }
         init = process_first();
     }
 

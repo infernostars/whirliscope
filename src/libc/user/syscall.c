@@ -48,6 +48,20 @@ long user_syscall3(long number, long arg0, long arg1, long arg2) {
     return rax;
 }
 
+long user_syscall4(long number, long arg0, long arg1, long arg2, long arg3) {
+    register long rax asm("rax") = number;
+    register long rdi asm("rdi") = arg0;
+    register long rsi asm("rsi") = arg1;
+    register long rdx asm("rdx") = arg2;
+    register long r10 asm("r10") = arg3;
+
+    asm volatile ("int $0x80"
+                  : "+a"(rax)
+                  : "D"(rdi), "S"(rsi), "d"(rdx), "r"(r10)
+                  : "rcx", "r8", "r9", "r11", "memory");
+    return rax;
+}
+
 void user_exit(long status) {
     user_syscall1(SYSCALL_EXIT, status);
     for (;;) {
@@ -125,6 +139,59 @@ long user_app_info(uint32_t index, struct user_app_info *info) {
 
 long user_app_run(uint32_t index) {
     return user_syscall1(SYSCALL_APP_RUN, index);
+}
+
+long user_app_run_path(const char *path) {
+    return user_syscall1(SYSCALL_APP_RUN_PATH, (long)path);
+}
+
+long user_fs_status(struct user_fs_status *status) {
+    return user_syscall1(SYSCALL_FS_STATUS, (long)status);
+}
+
+long user_fs_list(const char *path, struct user_fs_dirent *entries,
+                  size_t max_entries) {
+    return user_syscall3(SYSCALL_FS_LIST, (long)path, (long)entries,
+                         (long)max_entries);
+}
+
+long user_fs_read(const char *path, void *buffer, size_t len, uint64_t offset) {
+    return user_syscall4(SYSCALL_FS_READ, (long)path, (long)buffer,
+                         (long)len, (long)offset);
+}
+
+long user_fs_getcwd(char *buffer, size_t len) {
+    return user_syscall2(SYSCALL_FS_GETCWD, (long)buffer, (long)len);
+}
+
+long user_fs_chdir(const char *path) {
+    return user_syscall1(SYSCALL_FS_CHDIR, (long)path);
+}
+
+long user_fs_write(const char *path, const void *buffer, size_t len,
+                   uint64_t offset) {
+    return user_syscall4(SYSCALL_FS_WRITE, (long)path, (long)buffer,
+                         (long)len, (long)offset);
+}
+
+long user_fs_create(const char *path) {
+    return user_syscall1(SYSCALL_FS_CREATE, (long)path);
+}
+
+long user_fs_mkdir(const char *path) {
+    return user_syscall1(SYSCALL_FS_MKDIR, (long)path);
+}
+
+long user_fs_unlink(const char *path) {
+    return user_syscall1(SYSCALL_FS_UNLINK, (long)path);
+}
+
+long user_fs_rmdir(const char *path) {
+    return user_syscall1(SYSCALL_FS_RMDIR, (long)path);
+}
+
+long user_fs_truncate(const char *path, uint64_t size) {
+    return user_syscall2(SYSCALL_FS_TRUNCATE, (long)path, (long)size);
 }
 
 void *user_sbrk(int64_t increment) {

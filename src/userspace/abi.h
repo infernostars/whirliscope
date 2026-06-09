@@ -7,7 +7,10 @@
 #define USERSPACE_ABI_VERSION 1u
 #define USERSPACE_STATUS_ABI_VERSION 1u
 #define USERSPACE_APP_INFO_ABI_VERSION 1u
+#define USER_FS_STATUS_ABI_VERSION 1u
 #define USERSPACE_APP_NAME_SIZE 32u
+#define USER_FS_NAME_SIZE 64u
+#define USER_FS_PATH_SIZE 128u
 
 #define USER_ERR_AGAIN (-1L)
 #define USER_ERR_FAULT (-2L)
@@ -45,6 +48,24 @@ enum syscall_number {
     SYSCALL_APP_COUNT = 18,
     SYSCALL_APP_INFO = 19,
     SYSCALL_APP_RUN = 20,
+    SYSCALL_FS_STATUS = 21,
+    SYSCALL_FS_LIST = 22,
+    SYSCALL_FS_READ = 23,
+    SYSCALL_FS_GETCWD = 24,
+    SYSCALL_FS_CHDIR = 25,
+    SYSCALL_FS_WRITE = 26,
+    SYSCALL_APP_RUN_PATH = 27,
+    SYSCALL_FS_CREATE = 28,
+    SYSCALL_FS_MKDIR = 29,
+    SYSCALL_FS_UNLINK = 30,
+    SYSCALL_FS_RMDIR = 31,
+    SYSCALL_FS_TRUNCATE = 32,
+};
+
+enum user_fs_type {
+    USER_FS_TYPE_UNKNOWN = 0,
+    USER_FS_TYPE_FILE = 1,
+    USER_FS_TYPE_DIR = 2,
 };
 
 enum user_keyboard_key {
@@ -140,6 +161,26 @@ struct user_app_info {
     uint64_t image_size;
     uint64_t entry;
     char name[USERSPACE_APP_NAME_SIZE];
+};
+
+struct user_fs_status {
+    uint32_t abi_version;
+    uint8_t mounted;
+    uint8_t reserved0[3];
+    uint32_t block_size;
+    uint64_t blocks;
+    uint64_t inodes;
+    uint64_t free_blocks;
+    uint64_t free_inodes;
+    char volume_name[16];
+};
+
+struct user_fs_dirent {
+    uint32_t inode;
+    uint8_t type;
+    uint8_t reserved0[3];
+    uint64_t size;
+    char name[USER_FS_NAME_SIZE];
 };
 
 #endif // WHIRLISCOPE_USERSPACE_ABI_H

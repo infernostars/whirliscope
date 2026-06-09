@@ -2,6 +2,7 @@
 
 #include "drivers/keyboard.h"
 #include "drivers/timer.h"
+#include "fs/ext2.h"
 #include "kernel/boot_info.h"
 #include "kernel/console.h"
 #include "kernel/klog.h"
@@ -18,8 +19,15 @@ static bool dispatch_ready;
 
 #define USER_WRITE_CHUNK 1024u
 #define USER_KLOG_READ_MAX 4096u
+#define USER_FS_PATH_MAX 128u
+#define USER_FS_LIST_MAX 32u
+#define USER_FS_READ_MAX 4096u
 
 static char klog_read_buffer[USER_KLOG_READ_MAX];
+static char fs_path_buffer[USER_FS_PATH_MAX];
+static char fs_resolved_path[USER_FS_PATH_MAX];
+static struct user_fs_dirent fs_dirent_buffer[USER_FS_LIST_MAX];
+static uint8_t fs_read_buffer[USER_FS_READ_MAX];
 
 void syscall_init(void) {
     dispatch_ready = true;
@@ -80,6 +88,118 @@ static bool copy_to_user(uint64_t user_address, const void *src, size_t len) {
     }
 
     return write_user_bytes(user_address, src, len);
+}
+
+static bool copy_user_string(uint64_t user_address, char *dest,
+                             size_t dest_size) {
+    if (dest_size == 0) {
+        return false;
+    }
+
+    for (size_t i = 0; i < dest_size; i++) {
+        if (!userspace_range_is_valid(user_address + i, 1)
+         || !read_user_bytes(user_address + i, &dest[i], 1)) {
+            return false;
+        }
+        if (dest[i] == '\0') {
+            return true;
+        }
+    }
+
+    dest[dest_size - 1] = '\0';
+    return false;
+}
+
+static bool resolve_path_for_current(const char *path, char *out,
+                                     size_t out_size) {
+    if (path == NULL || out == NULL || out_size == 0 || path[0] == '\0') {
+        return false;
+    }
+
+    struct process *current = scheduler_current_process();
+    const char *cwd = current != NULL && current->cwd[0] != '\0'
+        ? current->cwd
+        : "/";
+    char combined[USER_FS_PATH_MAX];
+    if (path[0] == '/') {
+        strncpy(combined, path, sizeof(combined) - 1);
+        combined[sizeof(combined) - 1] = '\0';
+    } else {
+        size_t cwd_len = strlen(cwd);
+        size_t path_len = strlen(path);
+        bool needs_slash = cwd_len > 1 && cwd[cwd_len - 1] != '/';
+        if (cwd_len + (needs_slash ? 1u : 0u) + path_len + 1u
+            > sizeof(combined)) {
+            return false;
+        }
+
+        strcpy(combined, cwd);
+        if (needs_slash) {
+            combined[cwd_len++] = '/';
+            combined[cwd_len] = '\0';
+        }
+        strcpy(combined + cwd_len, path);
+    }
+
+    if (out_size < 2) {
+        return false;
+    }
+    out[0] = '/';
+    out[1] = '\0';
+    size_t out_len = 1;
+
+    const char *cursor = combined;
+    while (*cursor == '/') {
+        cursor++;
+    }
+    while (*cursor != '\0') {
+        const char *start = cursor;
+        while (*cursor != '\0' && *cursor != '/') {
+            cursor++;
+        }
+        size_t len = (size_t)(cursor - start);
+
+        if (len == 1 && start[0] == '.') {
+            // Current-directory components do not affect the resolved path.
+        } else if (len == 2 && start[0] == '.' && start[1] == '.') {
+            if (out_len > 1) {
+                while (out_len > 1 && out[out_len - 1] != '/') {
+                    out_len--;
+                }
+                if (out_len > 1) {
+                    out_len--;
+                }
+                out[out_len] = '\0';
+            }
+        } else if (len != 0) {
+            size_t needed = out_len + (out_len > 1 ? 1u : 0u) + len + 1u;
+            if (needed > out_size) {
+                return false;
+            }
+            if (out_len > 1) {
+                out[out_len++] = '/';
+            }
+            memcpy(out + out_len, start, len);
+            out_len += len;
+            out[out_len] = '\0';
+        }
+
+        while (*cursor == '/') {
+            cursor++;
+        }
+    }
+
+    if (out_len == 0) {
+        out[0] = '/';
+        out[1] = '\0';
+    }
+    return true;
+}
+
+static bool copy_and_resolve_user_path(uint64_t user_address) {
+    return copy_user_string(user_address, fs_path_buffer, sizeof(fs_path_buffer))
+        && resolve_path_for_current(fs_path_buffer, fs_resolved_path,
+                                    sizeof(fs_resolved_path));
 }
 
 static long long write_user_string(uint64_t user_address, size_t len) {
@@ -276,43 +396,147 @@ long long syscall_dispatch(struct syscall_frame *frame) {
             return 0;
         }
         case SYSCALL_APP_COUNT:
-            return (long long)process_embedded_app_count();
-        case SYSCALL_APP_INFO: {
-            const struct embedded_user_app *app =
-                process_embedded_app_at((size_t)frame->arg0);
-            if (app == NULL) {
-                return SYSCALL_ERR_INVAL;
-            }
-
-            struct elf64_image image;
-            size_t image_size = (size_t)(app->end - app->start);
-            if (!elf64_validate_user_image(app->start, image_size, &image)) {
-                return SYSCALL_ERR_FAULT;
-            }
-
-            struct user_app_info info = {
-                .abi_version = USERSPACE_APP_INFO_ABI_VERSION,
-                .index = (uint32_t)frame->arg0,
-                .image_size = image_size,
-                .entry = image.entry,
-            };
-            strncpy(info.name, app->name, sizeof(info.name) - 1);
-            info.name[sizeof(info.name) - 1] = '\0';
-
-            if (!copy_to_user(frame->arg1, &info, sizeof(info))) {
-                return SYSCALL_ERR_FAULT;
-            }
             return 0;
-        }
-        case SYSCALL_APP_RUN: {
+        case SYSCALL_APP_INFO:
+        case SYSCALL_APP_RUN:
+            return SYSCALL_ERR_INVAL;
+        case SYSCALL_APP_RUN_PATH: {
+            if (!copy_and_resolve_user_path(frame->arg0)) {
+                return SYSCALL_ERR_FAULT;
+            }
+            struct process *current = scheduler_current_process();
             struct process *process =
-                process_create_embedded_process((size_t)frame->arg0);
+                process_create_filesystem_process(fs_resolved_path,
+                                                  current != NULL
+                                                      ? current->cwd
+                                                      : "/");
             if (process == NULL) {
                 return SYSCALL_ERR_INVAL;
             }
 
             scheduler_run_process_blocking(process, frame);
         }
+        case SYSCALL_FS_STATUS: {
+            struct user_fs_status status;
+            ext2_get_status(&status);
+            if (!copy_to_user(frame->arg0, &status, sizeof(status))) {
+                return SYSCALL_ERR_FAULT;
+            }
+            return 0;
+        }
+        case SYSCALL_FS_LIST: {
+            if (!copy_and_resolve_user_path(frame->arg0)) {
+                return SYSCALL_ERR_FAULT;
+            }
+
+            size_t max_entries = (size_t)frame->arg2;
+            if (max_entries > USER_FS_LIST_MAX) {
+                max_entries = USER_FS_LIST_MAX;
+            }
+
+            long count = ext2_list_dir(fs_resolved_path, fs_dirent_buffer,
+                                       max_entries);
+            if (count < 0) {
+                return count;
+            }
+
+            size_t bytes = (size_t)count * sizeof(struct user_fs_dirent);
+            if (!copy_to_user(frame->arg1, fs_dirent_buffer, bytes)) {
+                return SYSCALL_ERR_FAULT;
+            }
+            return count;
+        }
+        case SYSCALL_FS_READ: {
+            if (!copy_and_resolve_user_path(frame->arg0)) {
+                return SYSCALL_ERR_FAULT;
+            }
+
+            size_t requested = (size_t)frame->arg2;
+            if (requested > USER_FS_READ_MAX) {
+                requested = USER_FS_READ_MAX;
+            }
+
+            long copied = ext2_read_file(fs_resolved_path, fs_read_buffer,
+                                         requested, frame->arg3);
+            if (copied < 0) {
+                return copied;
+            }
+
+            if (!copy_to_user(frame->arg1, fs_read_buffer, (size_t)copied)) {
+                return SYSCALL_ERR_FAULT;
+            }
+            return copied;
+        }
+        case SYSCALL_FS_GETCWD: {
+            struct process *current = scheduler_current_process();
+            const char *cwd = current != NULL && current->cwd[0] != '\0'
+                ? current->cwd
+                : "/";
+            size_t len = strlen(cwd) + 1;
+            if (len > (size_t)frame->arg1) {
+                return SYSCALL_ERR_INVAL;
+            }
+            if (!copy_to_user(frame->arg0, cwd, len)) {
+                return SYSCALL_ERR_FAULT;
+            }
+            return 0;
+        }
+        case SYSCALL_FS_CHDIR: {
+            if (!copy_and_resolve_user_path(frame->arg0)) {
+                return SYSCALL_ERR_FAULT;
+            }
+            struct user_fs_dirent entry;
+            if (ext2_stat(fs_resolved_path, &entry) != 0
+             || entry.type != USER_FS_TYPE_DIR) {
+                return SYSCALL_ERR_INVAL;
+            }
+            struct process *current = scheduler_current_process();
+            if (!process_set_cwd(current, fs_resolved_path)) {
+                return SYSCALL_ERR_INVAL;
+            }
+            return 0;
+        }
+        case SYSCALL_FS_WRITE: {
+            if (!copy_and_resolve_user_path(frame->arg0)) {
+                return SYSCALL_ERR_FAULT;
+            }
+
+            size_t requested = (size_t)frame->arg2;
+            if (requested > USER_FS_READ_MAX) {
+                requested = USER_FS_READ_MAX;
+            }
+            if (!read_user_bytes(frame->arg1, fs_read_buffer, requested)) {
+                return SYSCALL_ERR_FAULT;
+            }
+
+            return ext2_write_file(fs_resolved_path, fs_read_buffer,
+                                   requested, frame->arg3);
+        }
+        case SYSCALL_FS_CREATE:
+            if (!copy_and_resolve_user_path(frame->arg0)) {
+                return SYSCALL_ERR_FAULT;
+            }
+            return ext2_create_file(fs_resolved_path);
+        case SYSCALL_FS_MKDIR:
+            if (!copy_and_resolve_user_path(frame->arg0)) {
+                return SYSCALL_ERR_FAULT;
+            }
+            return ext2_mkdir(fs_resolved_path);
+        case SYSCALL_FS_UNLINK:
+            if (!copy_and_resolve_user_path(frame->arg0)) {
+                return SYSCALL_ERR_FAULT;
+            }
+            return ext2_unlink(fs_resolved_path);
+        case SYSCALL_FS_RMDIR:
+            if (!copy_and_resolve_user_path(frame->arg0)) {
+                return SYSCALL_ERR_FAULT;
+            }
+            return ext2_rmdir(fs_resolved_path);
+        case SYSCALL_FS_TRUNCATE:
+            if (!copy_and_resolve_user_path(frame->arg0)) {
+                return SYSCALL_ERR_FAULT;
+            }
+            return ext2_truncate_file(fs_resolved_path, frame->arg1);
         default:
             return SYSCALL_ERR_NOSYS;
     }

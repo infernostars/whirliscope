@@ -9,6 +9,8 @@
 #define LINE_SIZE 128
 #define HISTORY_SIZE 8
 #define LOG_DUMP_MAX 4096
+#define FS_LIST_MAX 32
+#define FS_READ_CHUNK 1024
 
 struct named_color {
     const char *name;
@@ -36,6 +38,10 @@ static char history[HISTORY_SIZE][LINE_SIZE];
 static size_t history_count;
 static size_t history_cursor;
 static char log_dump[LOG_DUMP_MAX];
+static struct user_fs_dirent fs_entries[FS_LIST_MAX];
+static char fs_read_buffer[FS_READ_CHUNK];
+static char cwd_buffer[USER_FS_PATH_SIZE];
+static char run_path_buffer[USER_FS_PATH_SIZE];
 
 static void println(const char *s) {
     fputs(s);
@@ -208,21 +214,32 @@ static void print_bool(uint8_t value);
 
 static void command_help(void) {
     println("commands:");
-    println("  help    show this command list");
-    println("  about   print userspace status");
+    println("  help      show this command list");
+    println("  about     print userspace status");
     println("  userspace print scheduler and address-space stats");
-    println("  apps    list embedded userspace programs");
-    println("  run     run an embedded userspace program");
-    println("  mem     print physical memory stats");
-    println("  kheap   print kernel heap stats");
-    println("  heap    test userspace malloc/sbrk");
-    println("  fb      print framebuffer info");
-    println("  log     print recent kernel log output");
-    println("  ticks   print timer state");
-    println("  echo    print command arguments");
-    println("  color   set framebuffer text color");
-    println("  clear   clear the terminal");
-    println("  exit    return to the kernel shell");
+    println("  apps      list filesystem userspace programs");
+    println("  run       run a filesystem userspace program");
+    println("  mem       print physical memory stats");
+    println("  kheap     print kernel heap stats");
+    println("  heap      test userspace malloc/sbrk");
+    println("  fb        print framebuffer info");
+    println("  log       print recent kernel log output");
+    println("  ticks     print timer state");
+    println("  fs        print filesystem status");
+    println("  pwd       print current directory");
+    println("  cd        change current directory");
+    println("  ls        list ext2 directory contents");
+    println("  cat       print an ext2 file");
+    println("  touch     create an ext2 file");
+    println("  mkdir     create an ext2 directory");
+    println("  rm        remove an ext2 file");
+    println("  rmdir     remove an empty ext2 directory");
+    println("  truncate  resize an ext2 file");
+    println("  edit      write text to an ext2 file");
+    println("  echo      print command arguments");
+    println("  color     set framebuffer text color");
+    println("  clear     clear the terminal");
+    println("  exit      return to the kernel shell");
 }
 
 static void command_about(void) {
@@ -370,9 +387,9 @@ static void command_userspace(void) {
 }
 
 static void command_apps(void) {
-    long count = user_app_count();
+    long count = user_fs_list("/bin", fs_entries, FS_LIST_MAX);
     if (count < 0) {
-        println("apps: count syscall failed");
+        println("apps: cannot list /bin");
         return;
     }
 
@@ -381,60 +398,18 @@ static void command_apps(void) {
     putchar('\n');
 
     for (long i = 0; i < count; i++) {
-        struct user_app_info info;
-        if (user_app_info((uint32_t)i, &info) != 0
-         || info.abi_version != USERSPACE_APP_INFO_ABI_VERSION) {
-            fputs("  ");
-            print_u64_dec((uint64_t)i);
-            println(": unavailable");
-            continue;
-        }
-
         fputs("  ");
-        print_u64_dec(info.index);
-        fputs(": ");
-        fputs(info.name);
+        fputs(fs_entries[i].name);
         fputs(" size=");
-        print_u64_dec(info.image_size);
-        fputs(" entry=");
-        print_u64_hex(info.entry);
+        print_u64_dec(fs_entries[i].size);
         putchar('\n');
     }
-}
-
-static int find_app(char *arg, uint32_t *out_index) {
-    size_t parsed_index;
-    if (parse_decimal_size(arg, &parsed_index)) {
-        long count = user_app_count();
-        if (count >= 0 && parsed_index < (size_t)count) {
-            *out_index = (uint32_t)parsed_index;
-            return 1;
-        }
-        return 0;
-    }
-
-    long count = user_app_count();
-    if (count < 0) {
-        return 0;
-    }
-
-    for (long i = 0; i < count; i++) {
-        struct user_app_info info;
-        if (user_app_info((uint32_t)i, &info) == 0
-         && info.abi_version == USERSPACE_APP_INFO_ABI_VERSION
-         && strcmp(info.name, arg) == 0) {
-            *out_index = (uint32_t)i;
-            return 1;
-        }
-    }
-
-    return 0;
 }
 
 static void command_run(char *args) {
     args = skip_spaces(args);
     if (*args == '\0') {
-        println("usage: run <app-name|index>");
+        println("usage: run <app-name|path>");
         return;
     }
 
@@ -444,18 +419,23 @@ static void command_run(char *args) {
     }
     *end = '\0';
 
-    uint32_t index;
-    if (!find_app(args, &index)) {
-        fputs("run: app not found: ");
-        println(args);
-        return;
+    const char *path = args;
+    if (strchr(args, '/') == NULL) {
+        size_t name_len = strlen(args);
+        if (name_len + 6 > sizeof(run_path_buffer)) {
+            println("run: name too long");
+            return;
+        }
+        strcpy(run_path_buffer, "/bin/");
+        strcpy(run_path_buffer + 5, args);
+        path = run_path_buffer;
     }
 
     fputs("running ");
     fputs(args);
     println("...");
 
-    long status = user_app_run(index);
+    long status = user_app_run_path(path);
     if (status < 0) {
         fputs("run: syscall failed ");
         print_u64_dec((uint64_t)(-status));
@@ -539,6 +519,239 @@ static void command_log(char *args) {
     }
 
     if (copied == 0 || log_dump[copied - 1] != '\n') {
+        putchar('\n');
+    }
+}
+
+static void command_fs(void) {
+    struct user_fs_status status;
+    if (user_fs_status(&status) != 0
+     || status.abi_version != USER_FS_STATUS_ABI_VERSION) {
+        println("fs: status syscall failed");
+        return;
+    }
+
+    if (!status.mounted) {
+        println("fs: no rootfs mounted");
+        return;
+    }
+
+    fputs("fs: ext2 mounted");
+    if (status.volume_name[0] != '\0') {
+        fputs(" volume=");
+        fputs(status.volume_name);
+    }
+    putchar('\n');
+
+    fputs("fs: block-size=");
+    print_u64_dec(status.block_size);
+    fputs(" blocks=");
+    print_u64_dec(status.blocks);
+    fputs(" free=");
+    print_u64_dec(status.free_blocks);
+    putchar('\n');
+
+    fputs("fs: inodes=");
+    print_u64_dec(status.inodes);
+    fputs(" free=");
+    print_u64_dec(status.free_inodes);
+    putchar('\n');
+}
+
+static void command_pwd(void) {
+    if (user_fs_getcwd(cwd_buffer, sizeof(cwd_buffer)) != 0) {
+        println("pwd: syscall failed");
+        return;
+    }
+    println(cwd_buffer);
+}
+
+static void command_cd(char *args) {
+    args = skip_spaces(args);
+    if (*args == '\0') {
+        args = "/";
+    }
+    if (user_fs_chdir(args) != 0) {
+        fputs("cd: cannot enter ");
+        println(args);
+    }
+}
+
+static void command_ls(char *args) {
+    args = skip_spaces(args);
+    if (*args == '\0') {
+        args = ".";
+    }
+
+    long count = user_fs_list(args, fs_entries, FS_LIST_MAX);
+    if (count < 0) {
+        fputs("ls: cannot read ");
+        println(args);
+        return;
+    }
+
+    for (long i = 0; i < count; i++) {
+        char marker = fs_entries[i].type == USER_FS_TYPE_DIR ? '/' : ' ';
+        putchar(marker);
+        fputs(fs_entries[i].name);
+        fputs("  ");
+        print_u64_dec(fs_entries[i].size);
+        putchar('\n');
+    }
+}
+
+static void command_edit(char *args) {
+    args = skip_spaces(args);
+    if (*args == '\0') {
+        println("usage: edit <path> <text>");
+        return;
+    }
+
+    char *path = args;
+    while (*args != '\0' && !is_space(*args)) {
+        args++;
+    }
+    if (*args == '\0') {
+        println("usage: edit <path> <text>");
+        return;
+    }
+    *args++ = '\0';
+    args = skip_spaces(args);
+
+    size_t len = strlen(args);
+    if (user_fs_truncate(path, len) != 0) {
+        fputs("edit: cannot resize ");
+        println(path);
+        return;
+    }
+
+    long written = user_fs_write(path, args, len, 0);
+    if (written < 0 || (size_t)written != len) {
+        fputs("edit: cannot write ");
+        println(path);
+        return;
+    }
+
+    println("edit: wrote file");
+}
+
+static void command_touch(char *args) {
+    args = skip_spaces(args);
+    if (*args == '\0') {
+        println("usage: touch <path>");
+        return;
+    }
+    if (user_fs_create(args) != 0) {
+        fputs("touch: cannot create ");
+        println(args);
+        return;
+    }
+    println("touch: created file");
+}
+
+static void command_mkdir(char *args) {
+    args = skip_spaces(args);
+    if (*args == '\0') {
+        println("usage: mkdir <path>");
+        return;
+    }
+    if (user_fs_mkdir(args) != 0) {
+        fputs("mkdir: cannot create ");
+        println(args);
+        return;
+    }
+    println("mkdir: created directory");
+}
+
+static void command_rm(char *args) {
+    args = skip_spaces(args);
+    if (*args == '\0') {
+        println("usage: rm <path>");
+        return;
+    }
+    if (user_fs_unlink(args) != 0) {
+        fputs("rm: cannot remove ");
+        println(args);
+        return;
+    }
+    println("rm: removed file");
+}
+
+static void command_rmdir(char *args) {
+    args = skip_spaces(args);
+    if (*args == '\0') {
+        println("usage: rmdir <path>");
+        return;
+    }
+    if (user_fs_rmdir(args) != 0) {
+        fputs("rmdir: cannot remove ");
+        println(args);
+        return;
+    }
+    println("rmdir: removed directory");
+}
+
+static void command_truncate(char *args) {
+    args = skip_spaces(args);
+    if (*args == '\0') {
+        println("usage: truncate <path> <size>");
+        return;
+    }
+
+    char *path = args;
+    while (*args != '\0' && !is_space(*args)) {
+        args++;
+    }
+    if (*args == '\0') {
+        println("usage: truncate <path> <size>");
+        return;
+    }
+    *args++ = '\0';
+    args = skip_spaces(args);
+
+    size_t size;
+    if (!parse_decimal_size(args, &size)) {
+        println("usage: truncate <path> <size>");
+        return;
+    }
+
+    if (user_fs_truncate(path, size) != 0) {
+        fputs("truncate: cannot resize ");
+        println(path);
+        return;
+    }
+    println("truncate: resized file");
+}
+
+static void command_cat(char *args) {
+    args = skip_spaces(args);
+    if (*args == '\0') {
+        println("usage: cat <path>");
+        return;
+    }
+
+    uint64_t offset = 0;
+    char last = '\0';
+    for (;;) {
+        long copied = user_fs_read(args, fs_read_buffer, sizeof(fs_read_buffer),
+                                   offset);
+        if (copied < 0) {
+            fputs("cat: cannot read ");
+            println(args);
+            return;
+        }
+        if (copied == 0) {
+            break;
+        }
+
+        for (long i = 0; i < copied; i++) {
+            putchar(fs_read_buffer[i]);
+            last = fs_read_buffer[i];
+        }
+        offset += (uint64_t)copied;
+    }
+
+    if (offset != 0 && last != '\n') {
         putchar('\n');
     }
 }
@@ -729,6 +942,50 @@ static int run_command(char *input) {
     }
     if (strcmp(command, "ticks") == 0) {
         command_ticks();
+        return 0;
+    }
+    if (strcmp(command, "fs") == 0) {
+        command_fs();
+        return 0;
+    }
+    if (strcmp(command, "pwd") == 0) {
+        command_pwd();
+        return 0;
+    }
+    if (strcmp(command, "cd") == 0) {
+        command_cd(args);
+        return 0;
+    }
+    if (strcmp(command, "ls") == 0) {
+        command_ls(args);
+        return 0;
+    }
+    if (strcmp(command, "cat") == 0) {
+        command_cat(args);
+        return 0;
+    }
+    if (strcmp(command, "touch") == 0) {
+        command_touch(args);
+        return 0;
+    }
+    if (strcmp(command, "mkdir") == 0) {
+        command_mkdir(args);
+        return 0;
+    }
+    if (strcmp(command, "rm") == 0) {
+        command_rm(args);
+        return 0;
+    }
+    if (strcmp(command, "rmdir") == 0) {
+        command_rmdir(args);
+        return 0;
+    }
+    if (strcmp(command, "truncate") == 0) {
+        command_truncate(args);
+        return 0;
+    }
+    if (strcmp(command, "edit") == 0) {
+        command_edit(args);
         return 0;
     }
     if (strcmp(command, "clear") == 0) {

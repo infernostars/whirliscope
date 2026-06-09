@@ -1,11 +1,16 @@
 #include "arch/x86_64/arch.h"
 #include "boot/limine_requests.h"
+#include "drivers/ata.h"
+#include "drivers/block.h"
 #include "drivers/keyboard.h"
 #include "drivers/timer.h"
+#include "fs/ext2.h"
+#include "fs/rootfs.h"
 #include "kernel/boot_info.h"
 #include "kernel/console.h"
 #include "kernel/panic.h"
 #include "libc/stdio.h"
+#include "libc/string.h"
 #include "memory/heap.h"
 #include "memory/pmm.h"
 #include "memory/vmm.h"
@@ -45,6 +50,20 @@ void kmain(void) {
     pmm_init(memmap_request.response, hhdm_request.response);
     vmm_init();
     kheap_init();
+    block_init();
+    ata_init();
+    rootfs_mount_from_block_devices();
+    if (!ext2_mounted() && module_request.response != NULL) {
+        for (uint64_t i = 0; i < module_request.response->module_count; i++) {
+            struct limine_file *module = module_request.response->modules[i];
+            if (module != NULL && module->address != NULL
+             && module->string != NULL
+             && strcmp(module->string, "rootfs") == 0) {
+                ext2_mount(module->address, module->size);
+                break;
+            }
+        }
+    }
     userspace_init();
 
     timer_init(100);

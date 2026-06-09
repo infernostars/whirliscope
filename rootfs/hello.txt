@@ -1,0 +1,2 @@
+Hello from Whirliscope's ext2 rootfs.
+This file is inside a host-editable ext2 image.

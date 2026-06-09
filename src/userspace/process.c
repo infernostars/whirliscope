@@ -1,5 +1,7 @@
 #include "process.h"
 
+#include "fs/ext2.h"
+#include "memory/heap.h"
 #include "userspace/address_space.h"
 #include "memory/pmm.h"
 #include "memory/vmm.h"
@@ -8,24 +10,6 @@
 
 static struct process processes[USERSPACE_MAX_PROCESSES];
 static process_id_t next_pid;
-
-extern const uint8_t user_init_start[];
-extern const uint8_t user_init_end[];
-extern const uint8_t user_hello_start[];
-extern const uint8_t user_hello_end[];
-
-static const struct embedded_user_app embedded_apps[] = {
-    {
-        .name = "init",
-        .start = user_init_start,
-        .end = user_init_end,
-    },
-    {
-        .name = "hello",
-        .start = user_hello_start,
-        .end = user_hello_end,
-    },
-};
 
 static uint64_t align_down(uint64_t value, uint64_t alignment) {
     return value & ~(alignment - 1);
@@ -123,18 +107,6 @@ struct process *process_first(void) {
     return processes[0].state == PROCESS_EMPTY ? NULL : &processes[0];
 }
 
-size_t process_embedded_app_count(void) {
-    return sizeof(embedded_apps) / sizeof(embedded_apps[0]);
-}
-
-const struct embedded_user_app *process_embedded_app_at(size_t index) {
-    if (index >= process_embedded_app_count()) {
-        return NULL;
-    }
-
-    return &embedded_apps[index];
-}
-
 bool process_prepare_user_image(struct process *process, process_id_t pid,
                                 const char *name, uint64_t pml4_phys,
                                 const struct elf64_image *image) {
@@ -168,14 +140,12 @@ bool process_prepare_user_image(struct process *process, process_id_t pid,
     return true;
 }
 
-static bool process_load_embedded_app(struct process *process,
-                                      process_id_t pid,
-                                      size_t app_index) {
-    const struct embedded_user_app *app = process_embedded_app_at(app_index);
-    if (process == NULL || app == NULL) {
-        return false;
-    }
-
+static bool process_load_user_image_bytes(struct process *process,
+                                          process_id_t pid,
+                                          const char *name,
+                                          const uint8_t *image_bytes,
+                                          size_t image_size,
+                                          const char *cwd) {
     uint64_t pml4_phys = vmm_create_address_space();
     uint64_t stack_phys = pmm_alloc_page();
     if (pml4_phys == 0 || stack_phys == 0) {
@@ -183,52 +153,99 @@ static bool process_load_embedded_app(struct process *process,
     }
 
     void *stack_page = pmm_phys_to_virt(stack_phys);
-    size_t image_size = (size_t)(app->end - app->start);
     struct elf64_image image;
-    if (!elf64_validate_user_image(app->start, image_size, &image)) {
+    if (!elf64_validate_user_image(image_bytes, image_size, &image)) {
         return false;
     }
 
     memset(stack_page, 0, VMM_PAGE_SIZE);
 
-    if (!load_user_image_segments(pml4_phys, app->start, &image)
+    if (!load_user_image_segments(pml4_phys, image_bytes, &image)
      || !vmm_map_page_in_space(pml4_phys, USERSPACE_STACK_TOP - VMM_PAGE_SIZE,
                                stack_phys,
                                VMM_USER | VMM_WRITABLE | VMM_NOEXEC)) {
         return false;
     }
 
-    if (!process_prepare_user_image(process, pid, app->name, pml4_phys,
-                                    &image)) {
+    if (!process_prepare_user_image(process, pid, name, pml4_phys, &image)) {
         return false;
     }
 
+    process_set_cwd(process, cwd != NULL ? cwd : "/");
     process->state = PROCESS_READY;
     process->main_thread.state = THREAD_READY;
     return true;
 }
 
-bool process_create_embedded_app(size_t app_index) {
-    return process_load_embedded_app(&processes[0], next_pid++, app_index);
-}
+struct process *process_create_filesystem_process(const char *path,
+                                                  const char *cwd) {
+    struct user_fs_dirent file;
+    if (path == NULL || ext2_stat(path, &file) != 0
+     || file.type != USER_FS_TYPE_FILE || file.size == 0) {
+        return NULL;
+    }
 
-bool process_create_embedded_demo(void) {
-    return process_create_embedded_app(0);
-}
+    uint8_t *image = kmalloc((size_t)file.size);
+    if (image == NULL) {
+        return NULL;
+    }
+    long read = ext2_read_file(path, image, (size_t)file.size, 0);
+    if (read < 0 || (uint64_t)read != file.size) {
+        kfree(image);
+        return NULL;
+    }
 
-struct process *process_create_embedded_process(size_t app_index) {
     for (size_t i = 1; i < USERSPACE_MAX_PROCESSES; i++) {
         if (processes[i].state == PROCESS_EMPTY
          || processes[i].state == PROCESS_EXITED) {
-            if (!process_load_embedded_app(&processes[i], next_pid++, app_index)) {
+            const char *name = path;
+            const char *slash = strrchr(path, '/');
+            if (slash != NULL && slash[1] != '\0') {
+                name = slash + 1;
+            }
+            if (!process_load_user_image_bytes(&processes[i], next_pid++,
+                                               name, image, (size_t)file.size,
+                                               cwd != NULL ? cwd : "/")) {
                 processes[i].state = PROCESS_EMPTY;
+                kfree(image);
                 return NULL;
             }
+            kfree(image);
             return &processes[i];
         }
     }
 
+    kfree(image);
     return NULL;
+}
+
+bool process_create_filesystem_init(const char *path) {
+    struct user_fs_dirent file;
+    if (path == NULL || ext2_stat(path, &file) != 0
+     || file.type != USER_FS_TYPE_FILE || file.size == 0) {
+        return false;
+    }
+
+    uint8_t *image = kmalloc((size_t)file.size);
+    if (image == NULL) {
+        return false;
+    }
+
+    long read = ext2_read_file(path, image, (size_t)file.size, 0);
+    if (read < 0 || (uint64_t)read != file.size) {
+        kfree(image);
+        return false;
+    }
+
+    bool loaded = process_load_user_image_bytes(&processes[0], next_pid++,
+                                                "init", image,
+                                                (size_t)file.size, "/");
+    kfree(image);
+    if (!loaded) {
+        processes[0].state = PROCESS_EMPTY;
+        return false;
+    }
+    return true;
 }
 
 bool process_sbrk(struct process *process, int64_t increment,
@@ -270,6 +287,16 @@ bool process_sbrk(struct process *process, int64_t increment,
     }
 
     process->heap_current = new_break;
+    return true;
+}
+
+bool process_set_cwd(struct process *process, const char *path) {
+    if (process == NULL || path == NULL || path[0] != '/') {
+        return false;
+    }
+
+    strncpy(process->cwd, path, sizeof(process->cwd) - 1);
+    process->cwd[sizeof(process->cwd) - 1] = '\0';
     return true;
 }
 

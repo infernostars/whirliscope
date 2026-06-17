@@ -7,3 +7,4 @@ image.iso
 src/generated/*
 temp/*
 __pycache__
+.vscode
